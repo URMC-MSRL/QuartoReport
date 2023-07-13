@@ -1,0 +1,768 @@
+---
+title: "URMC MSRL Proteomic Interactive Report"
+format: 
+   html: 
+      code-fold: true
+      page-layout: full
+      theme: flatly
+      toc: TRUE
+---
+
+This document is designed for the analysis of proteomic data from the
+URMC Mass Spectrometry Core Facility. The purpose is two-fold:
+
+1.  It allows for users with limited to no coding or data visualization
+    experience to generate frequently used figures including sample
+    clustering and volcano plots.
+
+2.  For users users with some coding knowledge, there is the option to
+    see the underlying code used to generate the plots. This not only
+    enables users to generate their own plots in a reproducible fashion,
+    but also to fine-tune parameters to better suit their individual
+    experiments. To see the code used, simply click the corresponding
+    'Code' block.
+
+```{r setup}
+#| label: libraries
+#| message: false
+
+# Below you will find the libraries we need to do our analysis. We will load in 
+# each one before doing any analysis.
+
+library(PerseusR)
+library(DT)
+library(tidyverse)
+library(shiny)
+library(plotly)
+library(NatParksPalettes)
+library(janitor)
+library(stats)
+library(dendextend)
+library(seriation)
+library(pheatmap)
+library(forcats)
+library(ggforce)
+library(ComplexHeatmap)
+library(glue)
+```
+
+```{r}
+#| label: data preparation
+#| message: false
+#| cache.extra: file.info("ProteinReport.txt")
+
+
+# Load and tidy the data
+# Afterwards, we will have a total of three data frames:
+#     1. Sample-level information containing each sample's MaxLFQ and number           of peptides
+#     2. Group-level information containing the average MaxLFQ
+#     3. t-test statistics including p-value and log2 fold-change
+
+## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## 
+## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## 
+## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ##
+
+#============================================================================#
+# 1. Import Perseus report ---------------------------------------------------
+#============================================================================#
+
+# In this step, using the file the MSRL generated in Perseus, we import all necessary data. This file has to be named ProteinReport.txt' and prior to uploading, it needs to be slightly modified, otherwise it is uploading incorrectly. To properly edit the file, ensure there are no blank cells in the first 3 rows. Additionally, the 3rd row needs the group names corresponding to their sample.
+
+##insert the file path to the perseus file here##
+perseus_report <- PerseusR::read.perseus('')
+
+# Additionally, we are going to set a few initial parameters specific to each experiment (researcher, and work order number) that will become important later.
+
+##for user name, ensure all characters are in lower case and in quotes (ex. 'swovick')##
+##for work order, ensure the numbers are in quotes and an underscore separates the year from the work number (ex. '23_001')##
+user_name <- ''
+work_order <- ''
+
+#============================================================================#
+# 2. Make metadata -----------------------------------------------------------
+#============================================================================#
+# In this step, we establish the connection between sample and the biological group they belong to. This relationship is commonly referred to as metadata.
+metadata <- annotRows(perseus_report) %>% 
+   rownames_to_column() %>% 
+   set_names('sample',
+             'group')
+
+metadata$sample <- sub("^[^_]*_([^_]*).*", 
+                       "\\1", 
+                       metadata$sample)
+metadata$group <- sub('-',
+                      '_',
+                      metadata$group)
+
+#============================================================================#
+# 3. Make data frames for specific analyses ----------------------------------
+#============================================================================#
+# In the following steps, we will separate our data from Perseus into multiple separate data frames. This will make subsequent analyses easier.
+## 3.1 Set-up ----------------------------------------------------------------
+# Before we separate any data, we have some set-up steps we need to do to make everything afterwards more efficient.
+
+# Because the column names have extra information such as the researcher and work order, we are going to want to remove those from each data frame we make. Since we will be doing this on multiple data frames, we are going to make one function that can do that.
+
+change_col_names <- function(df1,
+                             df2) {
+   name_vector <- dplyr::slice(df1,
+                               1) %>%
+      unlist(use.names = FALSE) %>%
+      unname()
+
+   blank_vector <- dplyr::slice(df1,
+                                2) %>%
+      unlist(use.names = FALSE) %>%
+      unname()
+
+   merged_vector <- stats::setNames(blank_vector,
+                                    name_vector)
+
+   renamed_df2 <- dplyr::rename_all(df2,
+                                    ~stringr::str_replace_all(.x,
+                                                              merged_vector))
+
+   return(renamed_df2)
+}
+
+# Since we will be making our data to long format in each df, we will be adding the protein annotation data to each df. The following function adds said protein annotation and then makes the data into long format, changing the value name based off the appropriate measurement.
+
+make_df_long <- function(df,
+                         measurement_level,
+                         measurement) {
+   data <- bind_cols(protein_annotation,
+                     df) %>% 
+      pivot_longer(cols = 4:last_col(),
+                   names_to = measurement_level,
+                   values_to = measurement)
+   
+   return(data)
+}
+
+# In order to properly remove the user name and work order, which are going to be different for every experiment, we are going to need to create variables that can store that information.
+
+user2 <- glue('{user_name}_')
+wo2 <- glue('_{work_order}')
+number_peptides <- 'number_peptides_'
+ttest_pvalue <- 'Student.s.T.test.p.value.'
+comp <- '_'
+ttest_log2fc <- 'Student.s.T.test.Difference.'
+
+## 3.2 Protein Annotation ----------------------------------------------------
+# We will separate the protein annotation data (Uniprot ID, Protein Name, Gene Name) so we can attach it to different df's later.
+protein_annotation <- annotCols(perseus_report) %>% 
+   select(c('Protein.Accession',
+            'Genes',
+            'Protein.Name')) %>% 
+   clean_names()
+
+
+## 3.3 Sample-level data -----------------------------------------------------
+### Abundance ----------------------------------------------------------------
+abundances <- main(perseus_report) %>% 
+   clean_names()
+# Use the custom name change function to remove user name and work order:
+# Make a df with the names 'user2' and 'wo2' that contains the user name and work order in one row and then add another empty row
+abundance_name_change <- tibble(user2,
+                                wo2) %>% 
+   add_row(user2 = '',
+           wo2 = '')
+# Using the new df, we replace all unwanted naming
+abundances <- change_col_names(df1 = abundance_name_change,
+                               df2 = abundances) %>% 
+   make_df_long(df = .,
+                measurement_level = 'sample',
+                measurement = 'abundance')
+### Number of Peptides -------------------------------------------------------
+# Performs the same steps as above just for peptide count instead
+n_peptides <- annotCols(perseus_report) %>%
+      select(contains('Peptide')) %>%
+      clean_names()
+
+peptide_name_change <- tibble(number_peptides,
+                              user2,
+                              wo2) %>%
+      add_row(number_peptides = '',
+              user2 = '',
+              wo2 = '')
+
+n_peptides <- change_col_names(df1 = peptide_name_change,
+                               df2 = n_peptides) %>% 
+   make_df_long(df = .,
+                measurement_level = 'sample',
+                measurement = 'number_peptides')
+
+### Combine sample-level data ------------------------------------------------
+# Combine all sample-level data together into one data frame
+sample_level <- full_join(x = abundances,
+                          y = n_peptides,
+                          by  = c('protein_accession',
+                                  'genes',
+                                  'protein_name',
+                                  'sample')) %>% 
+   left_join(y = metadata,
+             by = 'sample') %>% 
+   mutate('log2_abundance' = log2(abundance),
+          .after = 'abundance') %>% 
+   relocate(group,
+            .after = 'sample')
+
+
+## 3.4 Group-level data ------------------------------------------------------
+### Group median abundance ---------------------------------------------------
+# Make a data frame with just the median protein abundance
+median_abundance <- annotCols(perseus_report) %>% 
+   select(-c(contains('Peptide'),
+             contains('p.value'),
+             contains('Difference'),
+             'Protein.Accession',
+             'Genes',
+             'Protein.Name')) %>% 
+   set_names(pull(distinct(metadata,
+                           group))) %>% 
+   make_df_long(df = .,
+                measurement_level = 'group',
+                measurement = 'median_abundance')
+
+### t-test Statistics --------------------------------------------------------   
+#### p-value -----------------------------------------------------------------
+pvalue <- annotCols(perseus_report) %>% 
+   select(contains('p.value'))
+pvalue_name_change <- tibble(ttest_pvalue,
+                             comp) %>% 
+   add_row(ttest_pvalue = '',
+           comp = '/')
+pvalue <- change_col_names(df1 = pvalue_name_change,
+                           df2 = pvalue) %>% 
+   make_df_long(df = .,
+                measurement_level = 'comparison',
+                measurement = 'p_value')
+#### Log2 fold-change --------------------------------------------------------
+log2fc <- annotCols(perseus_report) %>%
+   select(contains('Difference'))
+# Use the same name change function again but now we also remove Student.s.T.test.Difference.
+log2fc_name_change <- tibble(ttest_log2fc,
+                             comp) %>%
+   add_row(ttest_log2fc = '',
+           comp = '/')
+
+log2fc <- change_col_names(df1 = log2fc_name_change,
+                           df2 = log2fc) %>% 
+   make_df_long(df = .,
+                measurement_level = 'comparison',
+                measurement = 'log2_fold_change')
+
+#### Combine p-value and t-test data into one df -----------------------------
+ttest <- full_join(x = log2fc,
+                   y = pvalue,
+                   by = c('protein_accession',
+                          'genes',
+                          'protein_name',
+                          'comparison'))
+
+#============================================================================#
+# 4. Make custom functions for commonly used actions -------------------------
+#============================================================================#
+# This pulls out from the sample-level data frame, just the sample name, uniprot accession name, and log2 MaxLFQ intensity. These values are then used repeatedly to make various figures
+get_sample_plot <- function(data) {
+   data_out <- data %>% 
+      distinct(sample,
+               protein_accession,
+               log2_abundance) %>% 
+      pivot_wider(names_from  = sample,
+                  values_from = log2_abundance)
+   
+   return(data_out)
+}
+
+# This pulls out sample and condition names along with MaxLFQ intensities in  base 10. This is used later for adding legend annotations in figures.
+get_condition_plot <- function(data) {
+   data_out <- data %>% 
+      rename(condition = group) %>% 
+      distinct(protein_accession,
+               condition,
+               abundance) 
+   
+   return(data_out)
+}
+
+#============================================================================#
+# 5. Plot Themes  ------------------------------------------------------------
+#============================================================================#
+
+# The majority of our plots use the same themes. Instead of typing them out every time we make a new plot, we will save the themes into a variable and use that variable while building our ggplot objects.
+
+# Make a common ggplot theme -------------------------------------------------
+plot_theme <- theme_bw() +
+   theme(plot.title   = element_text(size = 20),
+         axis.title.x = element_text(size = 15),
+         axis.text.y  = element_text(size = 15),
+         axis.text.x  = element_text(size  = 12,
+                                     angle = 75,
+                                     hjust = 1),
+         axis.title.y = element_text(size = 15),
+         legend.title = element_text(size = 15),
+         legend.text  = element_text(size = 15))
+
+# Make a palette for the volcano plots ---------------------------------------
+volcanoes_palette <- natparks.pals(name = 'Volcanoes', 
+                                   5, 
+                                   'discrete')
+```
+
+# Data Quality Graphs
+
+We have included several plots that may be useful for you to assess the
+overall quality of your data. These plots are sometimes included in
+proteomic papers but are usually not necessary.
+
+## Hierarchical Sample Clustering
+
+The heatmap below displays how closely related (or well correlated) each
+sample is to one another. The colors within the heatmap correspond to
+the Spearman rank correlation between two given samples with yellow
+corresponding to a correlation of '1' and blue corresponding to the
+lowest correlation. Groups (or conditions) are represented by colored
+block above the heatmap. Dendrogram clusters are determined through the
+"complete linkage" agglomeration method as defined by "stats::hclust".
+
+In an ideal scenario, all samples belonging to one group should be
+clustered among one another and be completely separate from the other
+groups. Additionally, the correlation should be higher between samples
+of the same group than between samples from different groups.
+
+```{r}
+#| label: heatmap data preparation
+#| message: false
+#| warning: false
+
+# Make an empty list to fill in with color later ------------------------------
+sample_colors <- 'placeholder'
+
+# Calculate the spearman rank correlation ----
+correlation <- sample_level %>% 
+ get_sample_plot() %>% 
+ column_to_rownames(var = 'protein_accession') %>% 
+ cor(method = 'spearman',
+     use    = 'complete.obs')
+
+annotation <- sample_level %>% 
+  mutate(Condition := as.character(group)) %>% 
+  distinct(sample,
+           Condition) %>% 
+  column_to_rownames(var = 'sample')
+
+# Create a list for coloring the annotations ----
+n_conditions <- 0
+conditions_colors <- c()
+
+conditions <- unique(pull(annotation,
+                          Condition))
+
+n_conditions <- length(conditions)
+
+conditions_colors <- natparks.pals('Acadia')[1:n_conditions]
+
+names(conditions_colors) <- conditions
+annotation_colors <- list(conditions_colors)
+names(annotation_colors) <- 'Condition'
+
+# Create heatmaply dendrogram for pheatmap -----
+distance <- dist(correlation)
+hierachical_clustering <- hclust(distance)
+dendrogram <- as.dendrogram(hierachical_clustering)
+dendrogram_row <- seriate_dendrogram(dendrogram,
+                                     distance,
+                                     method = "OLO")
+dendrogram_column <- rotate(dendrogram_row,
+                            order = rev(labels(distance)
+                                        [get_order(as.hclust(dendrogram_row))])
+                            )
+```
+
+```{r}
+#| label: complex heatmap render
+#| fig-height: 9
+#| fig-width:  10
+
+complex_annotation = HeatmapAnnotation(Condition = annotation$Condition,
+                                       col = annotation_colors,
+                                       height = unit(6, 'cm'))
+heatmap_list <- Heatmap(
+   correlation,
+   cluster_rows = as.hclust(dendrogram_row),
+   cluster_columns = as.hclust(dendrogram_column),
+   show_row_dend = FALSE,
+   top_annotation = complex_annotation,
+   name = 'Spearman',
+   column_title = "Correlation-based Hierachical Clustering",
+   column_title_gp = gpar(fontsize = 15, 
+                          fontface = 'bold'),
+   col = natparks.pals('Volcanoes', 
+                       100,
+                       'continuous'),
+   rect_gp = gpar(col = 'grey', 
+                  lwd = 0.25),
+   heatmap_legend_param = list(legend_height = unit(10, 'cm'),
+                               legend_gp = grid::gpar(fontsize = 11),
+                               title = 
+'Spearman 
+Correlation'),
+   column_names_gp = grid::gpar(fontsize = 10),
+   row_names_gp = grid::gpar(fontsize = 10),
+)
+
+draw(heatmap_list,
+     merge_legend = TRUE)
+```
+
+## Coefficient of Variation (CV)
+
+The violin plots below display the coefficient of variation (CV) of
+protein levels between samples within each group. There is an additional
+plot that displays the CV of protein levels between all samples. In a
+properly designed experiment, the CV of this comparison should be higher
+than all of the other groups.
+
+```{r}
+#| label: cv distribution preparation
+#| message: false
+
+# Measure CV values for each protein group across all samples -----------------
+# In order to plot the coefficient of variation (CV) values of protein 
+# abundances across our groups, we will first need to manually calculate the CV 
+# (standard distribution divided by the mean, multiplied by 100) both within 
+# each group, and then across all groups. The main reason to measure among all 
+# groups is just a sanity check. If our experiment is designed properly, the 
+# mass spectrometer performed as expected, and we calculated MaxLFQ abundances 
+# correctly, the distribution CVs for each group should be lower than the CV
+# distribution for all groups combined.
+#
+# The first thing we do is use one of our functions we defined earlier which 
+# pulls out the following data: sample, group, protein ID, log2 MaxLFQ. Then we
+# calculate the CV for each group and between all groups and pivot it into long
+# format to make plotting easier. And then filter our results to only have CV 
+# values of less than 200 so as not to make the plot illegible.
+
+ cv <- sample_level %>% 
+   get_condition_plot() %>% 
+   drop_na() %>% 
+   group_by(protein_accession) %>% 
+   mutate(cv_combined = (sd(abundance)/mean(abundance)) * 100) %>% 
+   group_by(condition, 
+            protein_accession) %>% 
+   mutate(cv = (sd(abundance)/mean(abundance)) * 100) %>% 
+   ungroup() %>% 
+   distinct(condition,
+            protein_accession,
+            cv_combined,
+            cv) %>% 
+   drop_na() %>% 
+   pivot_longer(cols = starts_with('cv'),
+                       names_to  = 'type',
+                       values_to = 'values') %>% 
+   mutate(type = ifelse(type == 'cv',
+                        condition,
+                        'Combined')) %>% 
+   mutate(type = fct_relevel(as.factor(type),
+                             'Combined')) %>% 
+   select(-condition) %>% 
+   group_by(type) %>% 
+   mutate(median = median(values)) %>% 
+   distinct() %>% 
+   filter(values < 200)
+
+```
+
+```{r}
+#| label: make cv plot
+#| message: false
+#| fig-height: 10
+#| fig-width:  10
+
+# Make the plot ---------------------------------------------------------------
+# Once we have our CV data calculated and filtered, we can then make it a gg 
+# object and plot it. For all our colors, I used the 'Volcanoes' palette
+# from the package 'natpark.pals' but feel free to choose whichever colors you 
+# desire.
+
+cv_plot <- ggplot(cv, aes(x = type,
+                          y = values,
+                          fill = type)) +
+   geom_violin(na.rm = T) +
+   labs(x = '',
+        y = 'Coefficient of Variation [%]',
+        fill = 'Condition') +
+   scale_fill_manual(values = natparks.pals('Volcanoes',
+                                            n_distinct(cv$type))) +
+   plot_theme
+
+# Once we store a ggplot as a variable, we can make that plot interactive by
+# making into a plotly object with the function below.
+
+ggplotly(cv_plot)
+
+```
+
+## Protein Abundance Distribution
+
+The violin plots below display the distribution of log2 protein
+abundances for each sample. Since signal intensity is normalized across
+samples, all samples should have relatively similar distributions while
+samples within the same group should have even more similar
+distributions. All distributions should also be normally distributed
+since the data has been log-transformed.
+
+```{r}
+#| label: prepare data for intensity distribution
+#| warning: false 
+
+pg_intensity <- sample_level %>%
+   rename('condition' = group) %>% 
+   distinct(sample,
+            condition,
+            protein_accession,
+            log2_abundance) %>%
+   drop_na(log2_abundance) %>% 
+   group_by(condition)
+
+```
+
+```{r}
+#| label: plot intensity distribution
+#| warning: false 
+
+intensity_plot <- pg_intensity %>%
+   ggplot(aes(x    = sample,
+              y    = log2_abundance,
+              fill = condition)) +
+   geom_violin(na.rm = T) +
+   labs(title = 'Protein Group-level Run MaxLFQ Abundances',
+        x     = '',
+        y     = 'Log2 Normalized Abundance') +
+   scale_fill_manual(values = natparks.pals('Volcanoes',
+                                            n_distinct(pg_intensity$condition))) +
+   scale_x_discrete(limits = c(distinct(pg_intensity, sample) %>% 
+                                  pull())) +
+   plot_theme
+
+ggplotly(intensity_plot)
+
+```
+
+## Principal Component Analysis (PCA)
+
+```{r}
+#| label: make PCA function
+#| warning: false 
+
+qc_pca <- function(data = sample_level,
+                   components = c("PC1", 
+                                  "PC2")) {
+   . <- NULL
+    pca_input <- data %>%
+      distinct(sample, 
+               protein_accession, 
+               log2_abundance) %>%
+      group_by(sample, 
+               protein_accession) %>%
+      summarise(intensity = sum(log2_abundance)) %>%
+      pivot_wider(names_from = sample, 
+                  values_from = intensity) %>%
+      drop_na() %>%
+      select(-protein_accession) %>%
+      t(.)
+
+    annotation <- data %>%
+      distinct(sample,
+               group)
+
+    pca <- prcomp(pca_input, 
+                  center = TRUE)
+
+    pca_df <- as.data.frame(pca$x) %>%
+      mutate(sample := factor(row.names(.))) %>%
+      left_join(annotation, 
+                by = 'sample')
+
+    pca_sdev_df <- as.data.frame(pca$sdev)
+
+    pca_sdev_df <- pca_sdev_df %>%
+      mutate(percent_variance = (pca$sdev^2 / sum(pca$sdev^2) * 100),
+             dimension = row.names(.)) %>%
+      mutate(dimension = factor(.data$dimension,
+                                levels = unique(str_sort(.data$dimension, 
+                                                         numeric = TRUE))))
+    plot <- pca_df %>%
+       ggplot(aes(x = !!rlang::sym(components[1]),
+                  y = !!rlang::sym(components[2]),
+                  col = group,
+                  label = sample)) +
+       geom_point(size = 3) +
+       labs(title = "Principal component analysis",
+            x = paste(
+               components[1],
+               "(",
+               round(
+                  pca_sdev_df$percent_variance[pca_sdev_df$dimension ==
+                                                str_extract(components[1],
+                                                            "\\d")
+                                               ], 
+                  1),
+               "%)"
+               ),
+            y = paste(
+               components[2],
+               "(",
+               round(
+                  pca_sdev_df$percent_variance[pca_sdev_df$dimension == 
+                                                str_extract(components[2], 
+                                                            "\\d")
+                                               ], 
+                  1),
+               "%)"
+               ),
+            color = "Condition") +
+       scale_color_manual(values = natparks.pals('Volcanoes',
+                                                 n_distinct(annotation$group))) +
+       plot_theme
+
+    return(plot)
+}
+```
+
+```{r}
+#| label: render PCA plot
+#| warning: false 
+
+pca_plot <- qc_pca(sample_level)
+ggplotly(pca_plot)
+```
+
+# Differential Expression Analysis
+
+## Volcano Plots
+
+Below are a series of volcano plots for each possible comparison
+displaying the change in protein expression between two given
+conditions. For each plot, cutoffs have been set to a log2 difference of
++/- 1 (equal to a 2x difference in expression) and the given comparison
+will be displayed at the top. Each dot represents a single protein
+quantified in the two conditions with the x-axis corresponding to the
+log2 difference and y-axis corresponding to the log10 p-value from a
+student's t-test. If a protein is significantly up-regulated (\>2x
+expression difference and \< 0.05 p-value), it will be colored blue. If
+a protein is significantly down-regulated (\<-2x difference and \< 0.05
+p-value), it will be colored red. If you hover over a protein of
+interest, a box will appear that shows: the gene name, the log2
+difference, and p-value.
+
+```{r}
+#| label: volcano plot preparation
+#| warning: false
+#| message: false
+
+volcano_plot <- function(data = ttest,
+                         p_value_cutoff = 0.05,
+                         log2_cutoff = 1) {
+
+# Prepare data to make the volcano plot ----
+## Take the data from t-test data frame ----
+data <- ttest %>%
+   mutate_at('log2_fold_change', 
+             as.numeric) %>% 
+   mutate_at('p_value', 
+             as.numeric) %>% 
+   mutate(mean_cutoff = p_value_cutoff)
+
+log2_fc_data <- data %>% 
+  pull(log2_fold_change) %>% 
+  as.numeric()
+
+## Make data frames containing data to make cutoff lines----
+cutoff_line <- data %>%
+   mutate(mean_cutoff = -log10(mean_cutoff)) %>%
+   distinct(comparison,
+            mean_cutoff) %>%
+   drop_na(mean_cutoff)
+
+# Make the volcano plot ----
+
+volcano_plot <- data %>%
+   filter(!((abs(log2_fold_change) > as.numeric(log2_cutoff)) & 
+               ifelse(is.na(p_value < mean_cutoff),
+                      FALSE,
+                      p_value < mean_cutoff))) %>%
+   ## Make the ggplot object ----
+   ggplot(aes(label1 = NULL,
+              label2 = genes)) +
+   geom_point(aes(x = log2_fold_change,
+                  y = -log10(p_value)),
+              colour = '#9da7bf') +
+   geom_point(data = filter(data,
+                            (log2_fold_change > log2_cutoff) &
+                            (p_value < mean_cutoff)),
+              aes(x = log2_fold_change,
+                  y = -log10(p_value)),
+              size   = 3,
+              colour = volcanoes_palette[[1]]) +
+   geom_point(data = filter(data,
+                            (log2_fold_change < -log2_cutoff) &
+                            (p_value < mean_cutoff)),
+              aes(x = log2_fold_change,
+                  y = -log10(p_value)),
+              size   = 3,
+              colour = volcanoes_palette[[4]]) +
+   labs(x_axis_label = 'log2 fold change',
+        y_axis_label = '-log10 p-value') +
+   ## Make cutoff lines ---- 
+   geom_hline(data = cutoff_line,
+              aes(yintercept = mean_cutoff),
+              linetype = 'dashed') +
+   geom_vline(xintercept = log2_cutoff,
+              linetype   = 'dashed') +
+   geom_vline(xintercept = -log2_cutoff,
+              linetype   = 'dashed') +
+   plot_theme +
+   theme_bw() +
+   theme(legend.position  = 'none') +
+   scale_x_continuous(breaks = seq(round(-1 * max(abs(log2_fc_data), 
+                                                  na.rm = T) - 0.5, 
+                                         0),
+                                   round(max(abs(log2_fc_data), 
+                                             na.rm = T) + 0.5, 
+                                         0),
+                                   1) ) +
+   ## Set plot x axes limits ----
+   coord_cartesian(xlim = c( round(-1 * max(abs(log2_fc_data), 
+                                            na.rm = T) - 0.5, 
+                                   0),
+                             round(max(abs(log2_fc_data),
+                                       na.rm = T) + 0.5, 
+                                   0))) +
+   facet_wrap_paginate(~ comparison, 
+                       ncol = 1, 
+                       nrow = 1)
+
+volcano_plotly <- ggplotly(volcano_plot)
+
+## return the plot ----
+#return(volcano_plot)
+return(volcano_plotly)
+          
+}
+```
+
+```{r}
+#| label: render volcano plot
+#| warning: false
+#| message: false
+#| fig.height: 30
+
+# Make the volcano plot for all comparisons
+vol_plot <- volcano_plot(data = ttest,
+             p_value_cutoff = 0.05,
+             log2_cutoff = 1) 
+
+vol_plot
+```
