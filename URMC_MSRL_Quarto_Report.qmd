@@ -361,7 +361,7 @@ conditions <- unique(pull(annotation,
 
 n_conditions <- length(conditions)
 
-conditions_colors <- natparks.pals('Acadia')[1:n_conditions]
+conditions_colors <- c(natparks.pals('DeathValley', n_conditions))
 
 names(conditions_colors) <- conditions
 annotation_colors <- list(conditions_colors)
@@ -493,7 +493,7 @@ cv_plot <- ggplot(cv, aes(x = type,
    labs(x = '',
         y = 'Coefficient of Variation [%]',
         fill = 'Condition') +
-   scale_fill_manual(values = natparks.pals('Volcanoes',
+   scale_fill_manual(values = natparks.pals('DeathValley',
                                             n_distinct(cv$type))) +
    plot_theme
 
@@ -540,7 +540,7 @@ intensity_plot <- pg_intensity %>%
    labs(title = 'Protein Group-level Run MaxLFQ Abundances',
         x     = '',
         y     = 'Log2 Normalized Abundance') +
-   scale_fill_manual(values = natparks.pals('Volcanoes',
+   scale_fill_manual(values = natparks.pals('DeathValley',
                                             n_distinct(pg_intensity$condition))) +
    scale_x_discrete(limits = c(distinct(pg_intensity, sample) %>% 
                                   pull())) +
@@ -623,7 +623,7 @@ qc_pca <- function(data = sample_level,
                "%)"
                ),
             color = "Condition") +
-       scale_color_manual(values = natparks.pals('Volcanoes',
+       scale_color_manual(values = natparks.pals('DeathValley',
                                                  n_distinct(annotation$group))) +
        plot_theme
 
